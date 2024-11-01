@@ -15,7 +15,9 @@ Compile with:
 	gcc qoiconv.c -std=c99 -O3 -o qoiconv
 
 */
-
+#include <fstream>
+#include <string>
+using namespace std;
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -26,17 +28,98 @@ Compile with:
 #include "stb_image_write.h"
 
 #define QOI_IMPLEMENTATION
+#define QOI_NO_STDIO
 #include "qoi.h"
 
+#define SOI_IMPLEMENTATION
+#define SOI_NO_STDIO
+#include "soi.h"
+
+#define ROI_IMPLEMENTATION
+#define ROI_NO_STDIO
+#include "roi.h"
+
+#define MINIZ_IMPLEMENTATION
+#define MINIZ_NO_STDIO
+#include "miniz.h"
 
 #define STR_ENDS_WITH(S, E) (strcmp(S + strlen(S) - (sizeof(E)-1), E) == 0)
+
+int compressData(const char* input, int inputSize, char* output, int& outputSize) {
+	int err;
+	z_stream zs;
+	zs.zalloc = Z_NULL;
+	zs.zfree = Z_NULL;
+	zs.opaque = Z_NULL;
+	zs.next_in = (Bytef *)input;
+	zs.avail_in = (uInt)inputSize;
+	zs.avail_out = (uInt)outputSize;
+	zs.next_out = (Bytef *)output;
+	err = deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, 15, 8, Z_DEFAULT_STRATEGY);
+	if (err != Z_OK) return err;
+	err = deflate(&zs, Z_FINISH);
+	deflateEnd(&zs);
+	outputSize = zs.total_out;
+	return err;
+}
+
+int uncompressData(const char* input, int inputSize, char* output, int& outputSize) {
+	int err;
+	z_stream zs;
+	zs.zalloc = Z_NULL;
+	zs.zfree = Z_NULL;
+	zs.opaque = Z_NULL;
+	zs.avail_in = (uInt)inputSize;
+	zs.next_in = (Bytef *)input;
+	zs.avail_out = (uInt)outputSize;
+	zs.next_out = (Bytef *)output;
+	err = inflateInit2(&zs, 15);
+	if (err != Z_OK) return err;
+	err = inflate(&zs, Z_FINISH);
+	if (err != Z_STREAM_END) {
+		inflateEnd(&zs);
+		return err == Z_OK ? Z_BUF_ERROR : err;
+	}
+	outputSize = zs.total_out;
+	err = inflateEnd(&zs);
+	return err;
+}
+
+static string loadStringFromFile(const string filename) {
+	string res;
+	if (filename == "") return res;
+	ifstream infile;
+	infile.open(filename.c_str(), ios::in | ios::binary | ios::ate);
+	if (infile.is_open()) {
+		int size = (int)infile.tellg();
+		char* bufferP = new char[size];
+		infile.seekg (0, ios::beg);
+		infile.read(bufferP, size);
+		if (!infile) size = (int)infile.gcount();
+		infile.close();
+		res = string(reinterpret_cast<const char*>(bufferP), size);
+		delete[] bufferP;
+	}
+	return res;
+}
+
+static int saveStringToFile(string s, const string filename) {
+	ofstream myfile(filename.c_str(), ios::out | ios::binary);
+	if (myfile.is_open()) {
+		myfile.write(s.c_str(), s.size());
+		myfile.close();
+		return 0;
+	}
+	return -1;
+}
 
 int main(int argc, char **argv) {
 	if (argc < 3) {
 		puts("Usage: qoiconv <infile> <outfile>");
 		puts("Examples:");
-		puts("  qoiconv input.png output.qoi");
+		puts("  qoiconv input.png output.roi");
 		puts("  qoiconv input.qoi output.png");
+		puts("Supported formats: qoi, qoz, roi, roz, soi, soz, png");
 		exit(1);
 	}
 
@@ -54,13 +137,77 @@ int main(int argc, char **argv) {
 		}
 
 		pixels = (void *)stbi_load(argv[1], &w, &h, NULL, channels);
-	}
-	else if (STR_ENDS_WITH(argv[1], ".qoi")) {
+	} else if (STR_ENDS_WITH(argv[1], ".qoi")) {
 		qoi_desc desc;
-		pixels = qoi_read(argv[1], &desc, 0);
+		string s = loadStringFromFile(argv[1]);
+		pixels = qoi_decode(s.c_str(), s.size(), &desc, 0);
+		// pixels = qoi_read(argv[1], &desc, 0);
 		channels = desc.channels;
 		w = desc.width;
 		h = desc.height;
+	} else if (STR_ENDS_WITH(argv[1], ".qoz")) {
+		qoi_desc desc;
+		string s = loadStringFromFile(argv[1]);
+		int outputSize = 0;
+		char* c = (char *)(&outputSize);
+		*c++ = s[s.size() - 4];
+		*c++ = s[s.size() - 3];
+		*c++ = s[s.size() - 2];
+		*c = s[s.size() - 1];
+		char* output = new char[outputSize];
+		uncompressData(s.c_str(), s.size(), output, outputSize);
+		pixels = qoi_decode(output, outputSize, &desc, 0);
+		// pixels = qoi_read(argv[1], &desc, 0);
+		channels = desc.channels;
+		w = desc.width;
+		h = desc.height;
+		delete[] output;
+	} else if (STR_ENDS_WITH(argv[1], ".roi")) {
+		roi_desc desc;
+		string s = loadStringFromFile(argv[1]);
+		pixels = roi_decode(s.c_str(), s.size(), &desc, 0);
+		channels = desc.channels;
+		w = desc.width;
+		h = desc.height;
+	} else if (STR_ENDS_WITH(argv[1], ".roz")) {
+		roi_desc desc;
+		string s = loadStringFromFile(argv[1]);
+		int outputSize = 0;
+		char* c = (char *)(&outputSize);
+		*c++ = s[s.size() - 4];
+		*c++ = s[s.size() - 3];
+		*c++ = s[s.size() - 2];
+		*c = s[s.size() - 1];
+		char* output = new char[outputSize];
+		uncompressData(s.c_str(), s.size(), output, outputSize);
+		pixels = roi_decode(output, outputSize, &desc, 0);
+		channels = desc.channels;
+		w = desc.width;
+		h = desc.height;
+		delete[] output;
+	} else if (STR_ENDS_WITH(argv[1], ".soi")) {
+		soi_desc desc;
+		string s = loadStringFromFile(argv[1]);
+		pixels = soi_decode(s.c_str(), s.size(), &desc, 0);
+		channels = desc.channels;
+		w = desc.width;
+		h = desc.height;
+	} else if (STR_ENDS_WITH(argv[1], ".soz")) {
+		soi_desc desc;
+		string s = loadStringFromFile(argv[1]);
+		int outputSize = 0;
+		char* c = (char *)(&outputSize);
+		*c++ = s[s.size() - 4];
+		*c++ = s[s.size() - 3];
+		*c++ = s[s.size() - 2];
+		*c = s[s.size() - 1];
+		char* output = new char[outputSize];
+		uncompressData(s.c_str(), s.size(), output, outputSize);
+		pixels = soi_decode(output, outputSize, &desc, 0);
+		channels = desc.channels;
+		w = desc.width;
+		h = desc.height;
+		delete[] output;
 	}
 
 	if (pixels == NULL) {
@@ -71,14 +218,124 @@ int main(int argc, char **argv) {
 	int encoded = 0;
 	if (STR_ENDS_WITH(argv[2], ".png")) {
 		encoded = stbi_write_png(argv[2], w, h, channels, pixels, 0);
-	}
-	else if (STR_ENDS_WITH(argv[2], ".qoi")) {
-		encoded = qoi_write(argv[2], pixels, &(qoi_desc){
-			.width = w,
-			.height = h, 
-			.channels = channels,
-			.colorspace = QOI_SRGB
-		});
+	} else if (STR_ENDS_WITH(argv[2], ".qoi")) {
+		qoi_desc d;
+		d.width = w;
+		d.height = h;
+		d.channels = channels;
+		d.colorspace = QOI_SRGB;
+		int l = 0;
+		char* data = (char *)qoi_encode(pixels, &d, &l);
+		if (l > 0) {
+			encoded = 1;
+			string s = string(data, l);
+			saveStringToFile(s, argv[2]);
+		}
+	} else if (STR_ENDS_WITH(argv[2], ".qoz")) {
+		qoi_desc d;
+		d.width = w;
+		d.height = h;
+		d.channels = channels;
+		d.colorspace = QOI_SRGB;
+		int l = 0;
+		char* data = (char *)qoi_encode(pixels, &d, &l);
+		if (l > 0) {
+			encoded = 1;
+			string s = string(data, l);
+			int inputSize = s.size();
+			int outputSize = compressBound(inputSize);
+			char* output = new char[outputSize];
+			compressData(s.c_str(), inputSize, output, outputSize);
+			string s2 = string(output, outputSize) + "xxxx";
+			char* c = (char *)(&inputSize);
+			s2[s2.size() - 4] = *c++;
+			s2[s2.size() - 3] = *c++;
+			s2[s2.size() - 2] = *c++;
+			s2[s2.size() - 1] = *c;
+			saveStringToFile(s2, argv[2]);
+			delete[] output;
+		}
+	} else if (STR_ENDS_WITH(argv[2], ".roi")) {
+		roi_desc d;
+		d.width = w;
+		d.height = h;
+		d.channels = channels;
+		d.colorspace = ROI_SRGB;
+		int l = 0;
+		roi_options opt;
+		opt.path = scalar;
+		opt.mlut = 0;
+		char* data = (char *)roi_encode(pixels, &d, &l, &opt);
+		if (l > 0) {
+			encoded = 1;
+			string s = string(data, l);
+			saveStringToFile(s, argv[2]);
+		}
+	} else if (STR_ENDS_WITH(argv[2], ".roz")) {
+		roi_desc d;
+		d.width = w;
+		d.height = h;
+		d.channels = channels;
+		d.colorspace = ROI_SRGB;
+		int l = 0;
+		roi_options opt;
+		opt.path = scalar;
+		opt.mlut = 0;
+		char* data = (char *)roi_encode(pixels, &d, &l, &opt);
+		if (l > 0) {
+			encoded = 1;
+			string s = string(data, l);
+			int inputSize = s.size();
+			int outputSize = compressBound(inputSize);
+			char* output = new char[outputSize];
+			compressData(s.c_str(), inputSize, output, outputSize);
+			string s2 = string(output, outputSize) + "xxxx";
+			char* c = (char *)(&inputSize);
+			s2[s2.size() - 4] = *c++;
+			s2[s2.size() - 3] = *c++;
+			s2[s2.size() - 2] = *c++;
+			s2[s2.size() - 1] = *c;
+			saveStringToFile(s2, argv[2]);
+			delete[] output;
+		}
+	} else if (STR_ENDS_WITH(argv[2], ".soi")) {
+		soi_desc d;
+		d.width = w;
+		d.height = h;
+		d.channels = channels;
+		d.colorspace = SOI_SRGB;
+		// encoded = soi_write((string(argv[2]) + "x").c_str(), pixels, &d);
+		int l = 0;
+		char* data = (char *)soi_encode(pixels, &d, &l);
+		if (l > 0) {
+			encoded = 1;
+			string s = string(data, l);
+			saveStringToFile(s, argv[2]);
+		}
+	} else if (STR_ENDS_WITH(argv[2], ".soz")) {
+		soi_desc d;
+		d.width = w;
+		d.height = h;
+		d.channels = channels;
+		d.colorspace = SOI_SRGB;
+		int l = 0;
+		char* data = (char *)soi_encode(pixels, &d, &l);
+		if (l > 0) {
+			encoded = 1;
+			string s = string(data, l);
+			int inputSize = s.size();
+			int outputSize = compressBound(inputSize);
+			char* output = new char[outputSize];
+			compressData(s.c_str(), inputSize, output, outputSize);
+			string s2 = string(output, outputSize) + "xxxx";
+			char* c = (char *)(&inputSize);
+			s2[s2.size() - 4] = *c++;
+			s2[s2.size() - 3] = *c++;
+			s2[s2.size() - 2] = *c++;
+			s2[s2.size() - 1] = *c;
+			saveStringToFile(s2, argv[2]);
+			delete[] output;
+		}
 	}
 
 	if (!encoded) {
